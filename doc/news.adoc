@@ -26,10 +26,17 @@ in ccache 4.13) for HTTP/Redis storage instead.
 - Added support for the QCC (QNX) compiler. +
   [small]#_[contributed by Joy Wang]_#
 
+- Added limited support for caching SARIF diagnostics:
+  `-fdiagnostics-format=sarif-stderr` and
+  `-fdiagnostics-{add,set}-output=sarif:file=...` for GCC, `/experimental:log`
+  for MSVC. +
+  [small]#_[contributed by Joel Rosdahl, Karl Fessel and Leander Schulten]_#
+
 - Added automatic depend mode for NVCC on Windows. +
   [small]#_[contributed by Xing Xiwen]_#
 
-- Added configurable directory layout for the `file://` storage backend. +
+- Added support for `@layout=local` in the file storage backend, allowing a copy
+  or read-only mount of a local cache to be used as remote storage. +
   [small]#_[contributed by Joel Rosdahl]_#
 
 - Extended the remote storage helper protocol with an `exists` operation,
@@ -84,8 +91,13 @@ in ccache 4.13) for HTTP/Redis storage instead.
 
 === Bug fixes
 
+- Fixed `base_dir` path rewriting when using MSVC's `/Yu` option: paths are no
+  longer rewritten to relative when using a precompiled header, since MSVC then
+  does not like relative paths for the `/Yu` and `/FI` arguments. +
+  [small]#_[contributed by Joel Rosdahl]_#
+
 - Fixed handling of compiler options when one recognized option is a prefix of
-  another.
+  another. +
   [small]#_[contributed by Joel Rosdahl]_#
 
 - Fixed `base_dir` handling for include paths in preprocessor mode (regression
