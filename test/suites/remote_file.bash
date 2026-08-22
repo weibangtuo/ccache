@@ -131,47 +131,68 @@ SUITE_remote_file() {
     expect_file_count 3 '*' remote # CACHEDIR.TAG + result + manifest
 
     # -------------------------------------------------------------------------
-    TEST "Empty layout"
+    TEST "Local layout"
 
-    CCACHE_REMOTE_STORAGE+=" @layout="
+    set_local_cache_file_count() {
+        local files=$1
+        local x
+        for x in 0 1 2 3 4 5 6 7 8 9 a b c d e f; do
+            mkdir -p "$CCACHE_DIR/$x"
+            echo "0 0 0 0 0 0 0 0 0 0 0 $((files / 16))" >"$CCACHE_DIR/$x/stats"
+        done
+    }
 
+    CCACHE_REMOTE_STORAGE= $CCACHE_COMPILE -c test.c
+
+    echo 'int level_3;' >test_level_3.c
+    set_local_cache_file_count $((16 * 16 * 2001))
+    CCACHE_REMOTE_STORAGE= $CCACHE_COMPILE -c test_level_3.c
+
+    echo 'int level_4;' >test_level_4.c
+    set_local_cache_file_count $((16 * 16 * 16 * 2001))
+    CCACHE_REMOTE_STORAGE= $CCACHE_COMPILE -c test_level_4.c
+
+    cp -a "$CCACHE_DIR" remote
+    $CCACHE -C >/dev/null
+    $CCACHE -z >/dev/null
+
+    CCACHE_REMOTE_STORAGE="file:$PWD/remote helper=_builtin_ @layout=local"
+    $CCACHE_COMPILE -c test.c
+    $CCACHE_COMPILE -c test_level_3.c
+    $CCACHE_COMPILE -c test_level_4.c
+    expect_stat direct_cache_hit 3
+    expect_stat remote_storage_hit 3
+    expect_stat remote_storage_read_hit 6 # 3 * (result + manifest)
+    expect_stat remote_storage_write 0
+
+    # A miss must not add entries to the implicitly read-only remote storage.
+    remote_file_count=$(find remote -type f | wc -l)
+    echo 'int x;' >>test.c
     $CCACHE_COMPILE -c test.c
     expect_stat cache_miss 1
-    expect_file_count 3 '*' remote # CACHEDIR.TAG + result + manifest
-    subdirs=$(find remote -type d | wc -l)
-    if [ "${subdirs}" -ne 1 ]; then # "remote" itself counts as one
-        test_failed "Expected no subdirectories in remote"
-    fi
-
-    $CCACHE -C >/dev/null
-    $CCACHE_COMPILE -c test.c
-    expect_stat direct_cache_hit 1
-    expect_stat remote_storage_hit 1
+    expect_stat remote_storage_write 0
+    expect_equal $remote_file_count $(find remote -type f | wc -l)
 
     # -------------------------------------------------------------------------
-    TEST "Pattern layout"
+    TEST "Local layout with read-only=false"
 
-    CCACHE_REMOTE_STORAGE+=" @layout=a/bc/d"
+    CCACHE_REMOTE_STORAGE+=" @layout=local read-only=false"
+    $CCACHE_COMPILE -c test.c 2>stderr.log
+    expect_contains stderr.log \
+        'file storage layout "local" is incompatible with read-only=false'
 
+    # -------------------------------------------------------------------------
+    TEST "Local layout with read-only=true"
+
+    CCACHE_REMOTE_STORAGE+=" @layout=local read-only=true"
     $CCACHE_COMPILE -c test.c
     expect_stat cache_miss 1
-    expect_file_count 3 '*' remote # CACHEDIR.TAG + result + manifest
-    entries_at_expected_depth=$(
-        find remote -mindepth 4 -maxdepth 4 -type f | wc -l
-    )
-    if [ "${entries_at_expected_depth}" -ne 2 ]; then
-        test_failed "Expected cache entries in an a/bc/d layout"
-    fi
-
-    $CCACHE -C >/dev/null
-    $CCACHE_COMPILE -c test.c
-    expect_stat direct_cache_hit 1
-    expect_stat remote_storage_hit 1
+    expect_stat remote_storage_write 0
 
     # -------------------------------------------------------------------------
-    TEST "Invalid pattern layout"
+    TEST "Invalid layout"
 
-    for layout in a/c a//b abcde; do
+    for layout in '' '*' a/b; do
         CCACHE_REMOTE_STORAGE="file:$PWD/remote helper=_builtin_ @layout=$layout"
         $CCACHE_COMPILE -c test.c 2>stderr.log
         expect_contains stderr.log "invalid file storage layout: \"$layout\""

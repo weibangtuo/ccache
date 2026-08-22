@@ -309,6 +309,20 @@ parse_storage_config(const std::vector<std::string_view>::const_iterator& begin,
       {"", 0.0, util::value_or_throw<core::Error>(url_from_string(url_str))});
   }
 
+  if (result.shards.front().url.scheme() == "file") {
+    const auto layout =
+      std::find_if(result.attributes.rbegin(),
+                   result.attributes.rend(),
+                   [](const auto& attr) { return attr.key == "layout"; });
+    if (layout != result.attributes.rend() && layout->value == "local") {
+      if (result.read_only == false) {
+        throw core::Error(
+          "file storage layout \"local\" is incompatible with read-only=false");
+      }
+      result.read_only = true;
+    }
+  }
+
   return result;
 }
 
