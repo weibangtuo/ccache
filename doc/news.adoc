@@ -2,7 +2,7 @@
 
 == Ccache 4.14
 
-Release date: TODO
+Release date: 2026-08-23
 
 
 === Deprecation notice
@@ -55,9 +55,9 @@ in ccache 4.13) for HTTP/Redis storage instead.
 - Added support for reflinking `.dwo` files when file cloning is enabled. +
   [small]#_[contributed by Fabian Parzefall]_#
 
-- Added detection of C23 `\#embed` directives in direct and depend mode and of
+- Added detection of C23 `#embed` directives in direct and depend mode and of
   assembler `.incbin` directives in depend mode, preventing false cache hits. +
-  [small]#_[contributed by Joel Rosdahl and Haaris Rahman]_#
+  [small]##_[contributed by Joel Rosdahl and Haaris Rahman]_##
 
 - Added support for `-Wp,` options with multiple macro definitions. +
   [small]#_[contributed by GitHub user subotac]_#
