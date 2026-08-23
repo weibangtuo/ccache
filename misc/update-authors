@@ -25,7 +25,9 @@ PSEUDONYMOUS = {
     "kingiler",
     "Kreijstal",
     "kzlar",
+    "Linux User",
     "luzpaz",
+    "markyang92",
     "Mikhail B",
     "Moritz",
     "R43Qi8krC",
@@ -33,6 +35,10 @@ PSEUDONYMOUS = {
     "senhtry",
     "vsplesk",
     "zcfh",
+    "RedNicStone",
+    "subotac",
+    "ThisIsFineTM",
+    "trustytrojan",
 }
 
 AUTHORS_ADOC = Path(__file__).parents[1] / "doc/authors.adoc"
