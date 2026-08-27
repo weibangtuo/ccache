@@ -322,8 +322,13 @@ static char *
 format_timestamp(uint64_t timestamp)
 {
 	if (timestamp > 0) {
+		// Convert to a real time_t first: casting &timestamp (uint64_t) to
+		// time_t* would make localtime_r read the wrong half of the value on
+		// big-endian platforms with a 32-bit time_t (e.g. HP-UX PA-RISC,
+		// AIX 5.1), rendering every timestamp as the epoch.
+		time_t tt = (time_t)timestamp;
 		struct tm tm;
-		localtime_r((time_t *)&timestamp, &tm);
+		localtime_r(&tt, &tm);
 		char buffer[100];
 		strftime(buffer, sizeof(buffer), "%c", &tm);
 		return format("    %s", buffer);
