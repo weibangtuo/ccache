@@ -18,26 +18,26 @@
 #define CCACHE_STDINT_H
 
 // Fallback <stdint.h> for platforms whose libc lacks the C99 header, notably
-// AIX 5.1/5.2 which only provide <inttypes.h>. This file is picked up via the
-// compiler's -I switches (see all_cppflags in Makefile.in) before the system
-// include directories. On all other platforms the system header is used via
-// #include_next.
+// AIX 5.1/5.2 and HP-UX 11i v1 which only provide <inttypes.h>. This file is
+// picked up via the compiler's -I switches (see all_cppflags in Makefile.in)
+// before the system include directories. On all other platforms the system
+// header is used via #include_next.
 
-#if defined(_AIX51) || defined(_AIX52)
+#if defined(_AIX51) || defined(_AIX52) || defined(__hpux)
 
 // AIX 5.x <inttypes.h> already provides all fixed-width types, the limit
 // macros and the *_C constants needed here (the ISO-C part is exposed when
 // _ALL_SOURCE is defined, which GCC defines by default on AIX). Redefining
 // the types ourselves would conflict with AIX's definitions (e.g. the fast
 // types differ), so only include the system header and add the few things it
-// lacks.
+// lacks. HP-UX 11i v1 likewise provides everything except SIZE_MAX.
 #include <inttypes.h>
 
 #ifndef SIZE_MAX
-#define SIZE_MAX __SIZE_MAX__
+#define SIZE_MAX ((size_t)-1)
 #endif
 
-#else // !(_AIX51 || _AIX52)
+#else // !(_AIX51 || _AIX52 || __hpux)
 
 #include_next <stdint.h>
 

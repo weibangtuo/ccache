@@ -16,7 +16,8 @@ again. Supported languages are C, C++, Objective-C and Objective-C++.
 本分支是 ccache 3.7 维护分支（基于 v3.7.12）的特殊定制版本：在保持 3.7
 纯 C 实现的前提下，将 ccache 4.x 的 **Redis 远程存储**特性移植到 3.7，
 供无法构建 4.x（需要 C++11 编译器）的老平台使用。已在 AIX 5.1 /
-GCC 4.5.4 与 Solaris 10 x86 / GCC 4.9 实机完成全功能验证。
+GCC 4.5.4、Solaris 10 x86 / GCC 4.9 与 HP-UX 11i v1 PA-RISC /
+GCC 4.2 实机完成全功能验证。
 
 ### 新增功能
 
@@ -68,7 +69,7 @@ URL 语法与 4.x 相同：
 | `src/ccache.c` | 读写路径集成（from_cache/to_cache/manifest）、remote_only 逻辑 |
 | `src/conf.c`、`src/conf.h`、`src/confitems.gperf`、`src/envtoconfitems.gperf` | remote_storage / remote_only 配置项、凭据脱敏 |
 | `src/ccache.h`、`src/stats.c` | remote_storage_hit/miss/error 统计计数器 |
-| `src/stdint.h`、`src/util.c`、`src/cleanup.c`、`m4/feature_macros.m4`、`configure.ac` | AIX 5.1 / Solaris 10 移植性修复 |
+| `src/stdint.h`、`src/util.c`、`src/cleanup.c`、`m4/feature_macros.m4`、`configure.ac` | AIX 5.1 / Solaris 10 / HP-UX 11i v1 移植性修复 |
 | `unittest/test_redis.c` | 新增：单元测试（URL 解析、bundle 编解码、脱敏） |
 | `test/suites/redis.bash` | 新增：集成测试（需本机 redis-server，无则自动跳过） |
 | `doc/MANUAL.adoc`、`doc/NEWS.adoc` | 文档 |
@@ -123,6 +124,25 @@ Solaris 上需要 GCC（如 OpenCSW 的 `/opt/csw/bin/gcc`）与 GNU make
 * Solaris 10 不支持 `SO_RCVTIMEO`/`SO_SNDTIMEO`、`MSG_NOSIGNAL` 与
   `SO_NOSIGPIPE`，redis 客户端的读写超时与 SIGPIPE 防御分别以 poll
   超时与专用信号处理实现（对其他平台无行为影响）。
+
+
+### 在 HP-UX 11i v1 PA-RISC 上构建
+
+HP-UX 上需要 GCC 与 GNU make（这台环境两者都在 `/usr/local/bin`，
+且默认 PATH 不包含，需显式加入；`ar`/`ld` 在 `/usr/ccs/bin`）：
+
+    PATH=/usr/local/bin:/usr/ccs/bin:$PATH \
+    CC=/usr/local/bin/gcc ../configure --with-bundled-zlib
+    gmake
+
+说明：
+
+* 同样推荐 `--with-bundled-zlib`；产物只依赖 `/usr/lib` 基系统库
+  （libm/libc），可直接拷贝到其他 HP-UX 11i v1 PA-RISC 机器运行。
+* HP-UX 11i v1 无 `<stdint.h>`，由源码树中的 `src/stdint.h` fallback
+  提供兼容（与 AIX 5.1 同一机制）。
+* 该平台的 tar 不识别 gzip 压缩包，解包需用
+  `gunzip -c ccache.tar.gz | tar xf -`。
 
 
 General information
