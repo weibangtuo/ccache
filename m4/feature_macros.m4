@@ -68,6 +68,13 @@ case $ac_sys_system/$ac_sys_release in
   # of union __?sigval. Reported by Stuart Bishop.
   SunOS/5.6)
     define_xopen_source=no;;
+  # On Solaris 10, _XOPEN_SOURCE 500 is rejected together with a C99 compiler
+  # and 600 requires C99 from the very first configure probe (before
+  # AC_PROG_CC_C99 has appended the C99 flag to CC), so neither level can be
+  # used safely. Do not define the feature macros at all; the __EXTENSIONS__
+  # definition below re-enables the Solaris-specific APIs we need.
+  SunOS/5.10)
+    define_xopen_source=no;;
   # On UnixWare 7, u_long is never defined with _XOPEN_SOURCE,
   # but used in /usr/include/netinet/tcp.h. Reported by Tim Rice.
   # Reconfirmed for 7.1.4 by Martin v. Loewis.
@@ -145,3 +152,13 @@ then
   AC_DEFINE(_POSIX_C_SOURCE, 200809L, Define to activate features from IEEE Stds 1003.1-2001)
 
 fi
+
+dnl __EXTENSIONS__ must also be defined when define_xopen_source is "no"
+dnl (e.g., on Solaris 10) to make Solaris-specific APIs visible; without the
+dnl feature macros the declarations would otherwise be hidden.
+case $ac_sys_system/$ac_sys_release in
+  SunOS/5.10|SunOS/5.11)
+    AC_DEFINE(__EXTENSIONS__, 1,
+              Define to activate Unix95-and-earlier features)
+    ;;
+esac

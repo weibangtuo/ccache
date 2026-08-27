@@ -117,6 +117,11 @@ dnl and round() is missing entirely (it gets a fallback in cleanup.c).
 AC_SEARCH_LIBS(floor, m)
 AC_CHECK_FUNCS([round])
 
+dnl On Solaris, socket()/connect() live in libsocket and gethostbyname() in
+dnl libnsl; on other platforms they are part of libc.
+AC_SEARCH_LIBS([socket], [socket])
+AC_SEARCH_LIBS([gethostbyname], [nsl])
+
 
 dnl Check for zlib
 AC_ARG_WITH(bundled-zlib,

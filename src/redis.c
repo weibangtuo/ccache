@@ -41,6 +41,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #endif
@@ -515,12 +516,50 @@ socket_write(int fd, const void *buf, size_t len)
 #endif
 }
 
+#if !defined(MSG_NOSIGNAL) && !defined(SO_NOSIGPIPE)
+// No-op SIGPIPE handler for platforms without MSG_NOSIGNAL and
+// SO_NOSIGPIPE: makes writes to a reset connection fail with EPIPE instead
+// of terminating the process. Installed in redis_connect().
+static void
+redis_sigpipe_noop(int sig)
+{
+	(void)sig;
+}
+#endif
+
+// Wait until the socket is ready for reading (POLLIN) or writing (POLLOUT).
+// Returns >0 when ready, 0 on timeout and <0 on error. This is the primary
+// timeout mechanism on platforms where SO_RCVTIMEO/SO_SNDTIMEO are not
+// supported (e.g. Solaris 10).
+static int
+wait_fd(int fd, short events, int timeout_ms)
+{
+	struct pollfd pfd;
+	pfd.fd = fd;
+	pfd.events = events;
+	pfd.revents = 0;
+	int pr;
+	do {
+		pr = poll(&pfd, 1, timeout_ms);
+	} while (pr < 0 && errno == EINTR);
+	return pr;
+}
+
 // Write all data to the socket.
 static bool
 write_all(struct redis_connection *conn, const void *data, size_t len)
 {
 	const char *p = data;
 	while (len > 0) {
+		int pr = wait_fd(conn->fd, POLLOUT, REDIS_OPERATION_TIMEOUT_MS);
+		if (pr == 0) {
+			cc_log("Redis: write timed out");
+			return false;
+		}
+		if (pr < 0) {
+			cc_log("Redis: poll error: %s", strerror(errno));
+			return false;
+		}
 		ssize_t n = socket_write(conn->fd, p, len);
 		if (n < 0) {
 			if (errno == EINTR) {
@@ -552,6 +591,15 @@ fill_buffer(struct redis_connection *conn)
 		unsigned char *new_buffer = x_realloc(conn->buffer, new_size);
 		conn->buffer = new_buffer;
 		conn->buf_size = new_size;
+	}
+	int pr = wait_fd(conn->fd, POLLIN, REDIS_OPERATION_TIMEOUT_MS);
+	if (pr == 0) {
+		cc_log("Redis: read timed out");
+		return false;
+	}
+	if (pr < 0) {
+		cc_log("Redis: poll error: %s", strerror(errno));
+		return false;
 	}
 	ssize_t n;
 	do {
@@ -755,11 +803,7 @@ connect_with_timeout(int fd, const struct sockaddr *addr, socklen_t addrlen)
 		return false;
 	}
 	if (ret != 0) {
-		struct pollfd pfd = {fd, POLLOUT, 0};
-		int pr;
-		do {
-			pr = poll(&pfd, 1, REDIS_CONNECT_TIMEOUT_MS);
-		} while (pr < 0 && errno == EINTR);
+		int pr = wait_fd(fd, POLLOUT, REDIS_CONNECT_TIMEOUT_MS);
 		if (pr <= 0) {
 			errno = (pr == 0) ? ETIMEDOUT : errno;
 			return false;
@@ -858,15 +902,31 @@ redis_connect(const char *url)
 	tv.tv_usec = (REDIS_OPERATION_TIMEOUT_MS % 1000) * 1000;
 	if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0
 	    || setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
-		// Timeouts are best effort; without them reads/writes may block
-		// indefinitely on platforms that don't support the options.
-		cc_log("Redis: failed to set socket timeouts: %s", strerror(errno));
+		// Timeouts are best effort; reads and writes are additionally
+		// guarded by poll() with a timeout, which also covers platforms
+		// that don't support the socket options (e.g. Solaris 10).
+		cc_log("Redis: socket timeout options not supported; "
+		       "using poll-based timeouts");
 	}
 	set_cloexec_flag(fd);
 #ifdef SO_NOSIGPIPE
 	{
 		int one = 1;
 		setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+	}
+#endif
+#if !defined(MSG_NOSIGNAL) && !defined(SO_NOSIGPIPE)
+	// Neither MSG_NOSIGNAL nor SO_NOSIGPIPE is available (e.g. Solaris 10).
+	// Install a no-op SIGPIPE handler so that a write to a reset connection
+	// returns EPIPE instead of killing the process. A signal handler (unlike
+	// SIG_IGN) is not inherited across exec, so the compiler subprocess is
+	// not affected.
+	{
+		struct sigaction sa;
+		sa.sa_handler = redis_sigpipe_noop;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = 0;
+		sigaction(SIGPIPE, &sa, NULL);
 	}
 #endif
 
