@@ -112,8 +112,10 @@ HW_FUNC_SNPRINTF
 HW_FUNC_VASPRINTF
 HW_FUNC_ASPRINTF
 
-dnl Check if -lm is needed.
-AC_SEARCH_LIBS(cos, m)
+dnl Check for libm and round(). On AIX 5.1 floor()/ceil() are only in libm
+dnl and round() is missing entirely (it gets a fallback in cleanup.c).
+AC_SEARCH_LIBS(floor, m)
+AC_CHECK_FUNCS([round])
 
 
 dnl Check for zlib

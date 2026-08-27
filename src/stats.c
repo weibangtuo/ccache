@@ -86,6 +86,27 @@ static struct {
 		FLAG_ALWAYS
 	},
 	{
+		STATS_REMOTE_STORAGE_HIT,
+		"remote_storage_hit",
+		"remote storage hit",
+		NULL,
+		0
+	},
+	{
+		STATS_REMOTE_STORAGE_MISS,
+		"remote_storage_miss",
+		"remote storage miss",
+		NULL,
+		0
+	},
+	{
+		STATS_REMOTE_STORAGE_ERROR,
+		"remote_storage_error",
+		"remote storage errors",
+		NULL,
+		0
+	},
+	{
 		STATS_LINK,
 		"called_for_link",
 		"called for link",

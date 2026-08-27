@@ -30,6 +30,7 @@
 #include "hashutil.h"
 #include "language.h"
 #include "manifest.h"
+#include "redis.h"
 
 #define STRINGIFY(x) #x
 #define TO_STRING(x) STRINGIFY(x)
@@ -44,6 +45,11 @@ extern unsigned lock_staleness_limit;
 
 static const char VERSION_TEXT[] =
 	MYNAME " version %s\n"
+#ifdef _WIN32
+	// Redis remote storage is not implemented on Windows.
+#else
+	"Features: redis-storage redis+unix-storage\n"
+#endif
 	"\n"
 	"Copyright (C) 2002-2007 Andrew Tridgell\n"
 	"Copyright (C) 2009-2020 Joel Rosdahl\n"
@@ -172,6 +178,17 @@ static char *cached_dwo;
 // Full path to the file containing the manifest
 // (cachedir/a/b/cdef[...]-size.manifest).
 static char *manifest_path;
+
+// Name (<hash>-<size>) of the manifest, i.e. the key under which the manifest
+// is stored in remote storage.
+static char *cached_manifest_name;
+
+// Connection to remote storage (Redis), created lazily.
+static struct redis_connection *redis_conn;
+
+// Set when connecting to remote storage failed; no further connection
+// attempts are made during the current invocation.
+static bool redis_connect_failed;
 
 // Time of compilation. Used to see if include files have changed after
 // compilation.
@@ -1375,6 +1392,387 @@ copy_file_from_cache(const char *source, const char *dest)
 	do_copy_or_link_file_from_cache(source, dest, true);
 }
 
+// ----------------------------------------------------------------------------
+// Remote storage (Redis)
+//
+// The interaction between local and remote storage follows ccache 4.x
+// semantics: the local cache is checked first; on a local miss the remote
+// storage is queried and a hit is written back to the local cache; a newly
+// compiled result is written to the local cache first and then to the remote
+// storage. Failures to reach the remote storage never fail the compilation.
+// In remote_only mode only the remote storage is trusted: entries are removed
+// from the local cache after having been delivered or uploaded.
+
+// Return a lazily created connection to the remote storage, or NULL if remote
+// storage is disabled or unavailable (in which case no further attempts are
+// made during this invocation).
+static struct redis_connection *
+remote_storage_connection(void)
+{
+	if (str_eq(conf->remote_storage, "") || redis_connect_failed) {
+		return NULL;
+	}
+	if (!redis_conn) {
+		redis_conn = redis_connect(conf->remote_storage);
+		if (!redis_conn) {
+			redis_connect_failed = true;
+			stats_update(STATS_REMOTE_STORAGE_ERROR);
+		}
+	}
+	return redis_conn;
+}
+
+// Redis command wrappers that follow ccache 4.x semantics for statistics: an
+// unreachable/failed remote storage is only counted as an error once per
+// invocation (the first time it fails), not once per failed command.
+static int
+remote_storage_get(struct redis_connection *conn, const char *key,
+                   char **data, size_t *size)
+{
+	bool was_failed = redis_is_failed(conn);
+	int rc = redis_get(conn, key, data, size);
+	if (rc == REDIS_RESULT_ERROR && !was_failed) {
+		stats_update(STATS_REMOTE_STORAGE_ERROR);
+	}
+	return rc;
+}
+
+static int
+remote_storage_set(struct redis_connection *conn, const char *key,
+                   const void *data, size_t size)
+{
+	bool was_failed = redis_is_failed(conn);
+	int rc = redis_set(conn, key, data, size);
+	if (rc == REDIS_RESULT_ERROR && !was_failed) {
+		stats_update(STATS_REMOTE_STORAGE_ERROR);
+	}
+	return rc;
+}
+
+// Whether remote storage is in effect for this invocation. remote_only
+// without a configured remote storage degrades to normal local caching.
+static bool
+remote_only_active(void)
+{
+	return !str_eq(conf->remote_storage, "") && conf->remote_only;
+}
+
+// Remove the locally cached files of the current cache entry and manifest.
+// Used in remote_only mode where entries are only kept in remote storage (the
+// local cache is used as a transient work area only).
+static void
+remove_local_entry_files(void)
+{
+	// manifest_path is only set in direct mode.
+	if (manifest_path) {
+		x_try_unlink(manifest_path);
+	}
+	// The other paths are set by update_cached_result_globals() which always
+	// runs before this function.
+	x_try_unlink(cached_obj);
+	x_try_unlink(cached_stderr);
+	x_try_unlink(cached_dep);
+	x_try_unlink(cached_cov);
+	x_try_unlink(cached_su);
+	x_try_unlink(cached_dia);
+	x_try_unlink(cached_dwo);
+}
+
+// Write data to a path in the cache via a temporary file (i.e. in an NFS safe
+// way). Returns false on failure.
+static bool
+write_file_to_cache(const char *path, const void *data, size_t size)
+{
+	char *tmp = x_strdup(path);
+	int fd = create_tmp_fd(&tmp);
+	size_t pos = 0;
+	bool write_ok = true;
+	while (pos < size) {
+		ssize_t n = write(fd, (const char *)data + pos, size - pos);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			cc_log("Failed to write %s: %s", tmp, strerror(errno));
+			write_ok = false;
+			break;
+		}
+		pos += (size_t)n;
+	}
+	close(fd);
+	bool ok = write_ok && x_rename(tmp, path) == 0;
+	if (!ok) {
+		cc_log("Failed to store %s in cache: %s",
+		       path,
+		       write_ok ? strerror(errno) : "write error");
+		x_unlink(tmp);
+	}
+	free(tmp);
+	return ok;
+}
+
+// Retrieve the cache entry (the set of files sharing the object name) from
+// remote storage and write the files to the local cache. Returns true if the
+// entry was retrieved.
+static bool
+fetch_entry_from_remote_storage(void)
+{
+	bool result = false;
+	if (!cached_obj_hash) {
+		return false;
+	}
+	if (conf->read_only || conf->read_only_direct) {
+		// Writing retrieved files to the local cache would break the promise
+		// of read-only modes, so don't use remote storage at all then.
+		return false;
+	}
+	struct redis_connection *conn = remote_storage_connection();
+	if (!conn) {
+		return false;
+	}
+
+	char *name =
+		format_hash_as_string(cached_obj_hash->hash, cached_obj_hash->size);
+	char *key = format("%s%s", REDIS_KEY_PREFIX, name);
+	char *data = NULL;
+	size_t size = 0;
+	int rc = remote_storage_get(conn, key, &data, &size);
+	if (rc != REDIS_RESULT_OK) {
+		goto out;
+	}
+
+	{
+		struct redis_bundle *bundle =
+			redis_bundle_decode((const unsigned char *)data, size);
+		if (!bundle) {
+			cc_log("Malformed cache entry for %s in remote storage", name);
+			stats_update(STATS_REMOTE_STORAGE_ERROR);
+			goto out;
+		}
+
+		bool has_obj = false;
+		for (size_t i = 0; i < bundle->n_files; ++i) {
+			if (bundle->files[i].kind == REDIS_FILE_OBJ) {
+				has_obj = true;
+				break;
+			}
+		}
+		if (!has_obj) {
+			cc_log("Cache entry for %s in remote storage has no object file",
+			       name);
+			stats_update(STATS_REMOTE_STORAGE_ERROR);
+			redis_bundle_free(bundle);
+			goto out;
+		}
+
+		int64_t total_size = 0;
+		size_t n_files = 0;
+		bool ok = true;
+		for (size_t i = 0; i < bundle->n_files; ++i) {
+			char *path = get_path_in_cache(
+				name, redis_file_suffix(bundle->files[i].kind));
+			if (!write_file_to_cache(path,
+			                         bundle->files[i].data,
+			                         bundle->files[i].size)) {
+				ok = false;
+				free(path);
+				break;
+			}
+			// Use the size on disk (like the regular cache write path) so
+			// that the cache size counters keep a consistent measure.
+			struct stat st;
+			if (x_stat(path, &st) == 0) {
+				total_size += (int64_t)file_size(&st);
+			} else {
+				total_size += (int64_t)bundle->files[i].size;
+			}
+			++n_files;
+			free(path);
+		}
+		if (!ok) {
+			// Remove partially written files so that an incomplete entry is
+			// not mistaken for a complete one.
+			remove_local_entry_files();
+			redis_bundle_free(bundle);
+			goto out;
+		}
+		redis_bundle_free(bundle);
+
+		// In remote_only mode the files are only a transient work area, so
+		// they shall not be part of the local cache size counters.
+		if (!conf->remote_only) {
+			stats_update_size(stats_file, total_size, (int)n_files);
+		}
+		stats_update(STATS_REMOTE_STORAGE_HIT);
+		cc_log("Retrieved cache entry for %s from remote storage", name);
+		result = true;
+	}
+
+out:
+	free(key);
+	free(name);
+	free(data);
+	return result;
+}
+
+// Retrieve the manifest from remote storage and write it to the local cache.
+// Returns true if the manifest was retrieved.
+static bool
+fetch_manifest_from_remote_storage(const char *name)
+{
+	bool result = false;
+	if (conf->read_only || conf->read_only_direct) {
+		// Writing retrieved files to the local cache would break the promise
+		// of read-only modes, so don't use remote storage at all then.
+		return false;
+	}
+	struct redis_connection *conn = remote_storage_connection();
+	if (!conn) {
+		return false;
+	}
+
+	char *key = format("%s%s", REDIS_KEY_PREFIX, name);
+	char *data = NULL;
+	size_t size = 0;
+	int rc = remote_storage_get(conn, key, &data, &size);
+	if (rc == REDIS_RESULT_OK) {
+		// Manifest files are gzip streams; a sanity check of the magic bytes
+		// prevents garbage (e.g. a ccache 4.x manifest in the same Redis
+		// database) from overwriting/shadowing the local manifest lookup.
+		if (size < 2 || (unsigned char)data[0] != 0x1f
+		    || (unsigned char)data[1] != 0x8b) {
+			cc_log("Manifest for %s in remote storage is malformed", name);
+			stats_update(STATS_REMOTE_STORAGE_ERROR);
+		} else if (write_file_to_cache(manifest_path, data, size)) {
+			if (!conf->remote_only) {
+				struct stat st;
+				int64_t disk_size =
+					x_stat(manifest_path, &st) == 0
+						? (int64_t)file_size(&st)
+						: (int64_t)size;
+				stats_update_size(manifest_stats_file, disk_size, 1);
+			}
+			cc_log("Retrieved manifest for %s from remote storage", name);
+			result = true;
+		}
+	}
+	free(key);
+	free(data);
+	return result;
+}
+
+// Store the set of cache entry files in remote storage.
+static void
+put_entry_in_remote_storage(void)
+{
+	if (!cached_obj_hash) {
+		return;
+	}
+	struct redis_connection *conn = remote_storage_connection();
+	if (!conn) {
+		return;
+	}
+
+	char *name =
+		format_hash_as_string(cached_obj_hash->hash, cached_obj_hash->size);
+	struct redis_bundle bundle;
+	bundle.n_files = 0;
+	bundle.files = x_calloc(REDIS_FILE_KIND_COUNT, sizeof(*bundle.files));
+
+	struct stat st;
+	for (unsigned kind = 0; kind < REDIS_FILE_KIND_COUNT; ++kind) {
+		char *path =
+			get_path_in_cache(name, redis_file_suffix((enum redis_file_kind)kind));
+		if (x_stat(path, &st) == 0) {
+			char *data = NULL;
+			size_t size = 0;
+			if (read_file(path, (size_t)st.st_size, &data, &size)) {
+				bundle.files[bundle.n_files].kind = (enum redis_file_kind)kind;
+				bundle.files[bundle.n_files].data = (unsigned char *)data;
+				bundle.files[bundle.n_files].size = size;
+				++bundle.n_files;
+			}
+		}
+		free(path);
+	}
+
+	if (bundle.n_files > 0) {
+		unsigned char *data = NULL;
+		size_t size = 0;
+		redis_bundle_encode(&bundle, &data, &size);
+		{
+			char *key = format("%s%s", REDIS_KEY_PREFIX, name);
+			if (remote_storage_set(conn, key, data, size)
+			    == REDIS_RESULT_OK) {
+				cc_log("Stored cache entry for %s in remote storage", name);
+				if (conf->remote_only) {
+					// The entry is now stored in remote storage only, so
+					// remove the local files. The cache size counters were
+					// incremented when the files were stored in the local
+					// cache, so compensate for the files actually removed.
+					int64_t removed_size = 0;
+					int removed_files = 0;
+					for (unsigned kind = 0; kind < REDIS_FILE_KIND_COUNT;
+					     ++kind) {
+						char *path = get_path_in_cache(
+							name,
+							redis_file_suffix((enum redis_file_kind)kind));
+						if (x_stat(path, &st) == 0) {
+							removed_size += (int64_t)file_size(&st);
+							++removed_files;
+						}
+						free(path);
+					}
+					remove_local_entry_files();
+					stats_update_size(
+						stats_file, -removed_size, -removed_files);
+				}
+			}
+			free(key);
+			free(data);
+		}
+	}
+
+	for (size_t i = 0; i < bundle.n_files; ++i) {
+		free(bundle.files[i].data);
+	}
+	free(bundle.files);
+	free(name);
+}
+
+// Store the manifest file in remote storage. Returns true if the manifest was
+// stored (or if there is nothing to store).
+static bool
+put_manifest_in_remote_storage(void)
+{
+	if (!cached_manifest_name) {
+		return false;
+	}
+	struct redis_connection *conn = remote_storage_connection();
+	if (!conn) {
+		return false;
+	}
+
+	struct stat st;
+	if (x_stat(manifest_path, &st) != 0) {
+		return false;
+	}
+	char *data = NULL;
+	size_t size = 0;
+	if (!read_file(manifest_path, (size_t)st.st_size, &data, &size)) {
+		return false;
+	}
+	char *key = format("%s%s", REDIS_KEY_PREFIX, cached_manifest_name);
+	bool result = false;
+	if (remote_storage_set(conn, key, data, size) == REDIS_RESULT_OK) {
+		cc_log("Stored manifest for %s in remote storage", cached_manifest_name);
+		result = true;
+	}
+	free(key);
+	free(data);
+	return result;
+}
+
 // Send cached stderr, if any, to stderr.
 static void
 send_cached_stderr(void)
@@ -1418,6 +1816,21 @@ update_manifest_file(void)
 				manifest_stats_file,
 				file_size(&st) - old_size,
 				old_size == 0 ? 1 : 0);
+		}
+		if (put_manifest_in_remote_storage() && conf->remote_only) {
+			// The manifest is now stored in remote storage only, so remove
+			// the local copy. Compensate the counters for exactly what was
+			// added above (the delta, not the full file size -- the file may
+			// have been retrieved from remote storage earlier in this
+			// invocation without being counted).
+			if (x_stat(manifest_path, &st) == 0) {
+				int64_t added = (int64_t)file_size(&st) - (int64_t)old_size;
+				x_unlink(manifest_path);
+				stats_update_size(
+					manifest_stats_file,
+					-added,
+					old_size == 0 ? -1 : 0);
+			}
 		}
 	} else {
 		cc_log("Failed to add object file hash to %s", manifest_path);
@@ -1676,6 +2089,9 @@ to_cache(struct args *args, struct hash *depend_mode_hash)
 	MTR_END("file", "file_put");
 
 	stats_update(STATS_CACHEMISS);
+	if (!str_eq(conf->remote_storage, "")) {
+		stats_update(STATS_REMOTE_STORAGE_MISS);
+	}
 
 	// Make sure we have a CACHEDIR.TAG in the cache part of cache_dir. This can
 	// be done almost anywhere, but we might as well do it near the end as we
@@ -1702,6 +2118,7 @@ to_cache(struct args *args, struct hash *depend_mode_hash)
 	// Everything OK.
 	send_cached_stderr();
 	update_manifest_file();
+	put_entry_in_remote_storage();
 
 	free(tmp_stderr);
 	free(tmp_stdout);
@@ -2328,17 +2745,31 @@ calculate_object_hash(struct args *args, struct args *preprocessor_args,
 		manifest_path = get_path_in_cache(manifest_name, ".manifest");
 		manifest_stats_file =
 			format("%s/%c/stats", conf->cache_dir, manifest_name[0]);
-		free(manifest_name);
+		free(cached_manifest_name);
+		cached_manifest_name = manifest_name;
 
-		cc_log("Looking for object file hash in %s", manifest_path);
-		MTR_BEGIN("manifest", "manifest_get");
-		object_hash = manifest_get(conf, manifest_path);
-		MTR_END("manifest", "manifest_get");
-		if (object_hash) {
-			cc_log("Got object file hash from manifest");
-			update_mtime(manifest_path);
+		// The manifest is not in the local cache (or we're in remote_only
+		// mode where only remote storage is used), so try to retrieve it from
+		// remote storage before giving up.
+		struct stat manifest_st;
+		bool manifest_available = stat(manifest_path, &manifest_st) == 0;
+		if (!manifest_available || remote_only_active()) {
+			manifest_available = fetch_manifest_from_remote_storage(manifest_name);
+		}
+		if (manifest_available) {
+			cc_log("Looking for object file hash in %s", manifest_path);
+			MTR_BEGIN("manifest", "manifest_get");
+			object_hash = manifest_get(conf, manifest_path);
+			MTR_END("manifest", "manifest_get");
+			if (object_hash) {
+				cc_log("Got object file hash from manifest");
+				update_mtime(manifest_path);
+			} else {
+				cc_log("Did not find object file hash in manifest");
+			}
 		} else {
-			cc_log("Did not find object file hash in manifest");
+			// remote_only: don't fall back to reading a local manifest.
+			cc_log("Manifest not in remote storage (remote_only mode)");
 		}
 	} else {
 		assert(preprocessor_args);
@@ -2398,9 +2829,21 @@ from_cache(enum fromcache_call_mode mode, bool put_object_in_manifest)
 	// Occasionally, e.g. on hard reset, our cache ends up as just filesystem
 	// meta-data with no content. Catch an easy case of this.
 	struct stat st;
-	if (stat(cached_obj, &st) != 0) {
-		cc_log("Object file %s not in cache", cached_obj);
-		return;
+	if (stat(cached_obj, &st) != 0 || remote_only_active()) {
+		// The object file is not in the local cache (or we're in remote_only
+		// mode where only remote storage is used), so try to retrieve the
+		// cache entry from remote storage before giving up.
+		bool fetched = fetch_entry_from_remote_storage();
+		if (remote_only_active() && !fetched) {
+			// remote_only: like ccache 4.x, don't fall back to reading (or
+			// touching in any way) a possibly stale local entry.
+			cc_log("Entry not in remote storage (remote_only mode)");
+			return;
+		}
+		if (stat(cached_obj, &st) != 0) {
+			cc_log("Object file %s not in cache", cached_obj);
+			return;
+		}
 	}
 	if (st.st_size == 0) {
 		cc_log("Invalid (empty) object file %s in cache", cached_obj);
@@ -2481,6 +2924,13 @@ from_cache(enum fromcache_call_mode mode, bool put_object_in_manifest)
 	}
 
 	MTR_END("cache", "from_cache");
+
+	if (remote_only_active()) {
+		// The output has been delivered, so the entry files (which were only
+		// retrieved as a transient work area) can be removed again. Hard links
+		// in hard_link mode keep the output valid.
+		remove_local_entry_files();
+	}
 
 	// And exit with the right status code.
 	x_exit(0);
@@ -3978,6 +4428,9 @@ cc_reset(void)
 	free(cached_dia); cached_dia = NULL;
 	free(cached_dwo); cached_dwo = NULL;
 	free(manifest_path); manifest_path = NULL;
+	free(cached_manifest_name); cached_manifest_name = NULL;
+	redis_disconnect(redis_conn); redis_conn = NULL;
+	redis_connect_failed = false;
 	time_of_compilation = 0;
 	for (size_t i = 0; i < ignore_headers_len; i++) {
 		free(ignore_headers[i]);

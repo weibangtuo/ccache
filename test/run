@@ -408,6 +408,7 @@ basedir
 compression
 readonly
 readonly_direct
+redis
 cleanup
 pch
 upgrade

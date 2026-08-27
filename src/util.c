@@ -743,25 +743,19 @@ x_strdup(const char *s)
 char *
 x_strndup(const char *s, size_t n)
 {
-#ifndef HAVE_STRNDUP
+	// Always use our own implementation instead of the system's strndup:
+	// AIX 5.1's strndup() has been observed to not NUL-terminate the result
+	// (depending on heap state), which corrupts every string built from it.
+	size_t m = 0;
 	if (!s) {
 		return NULL;
 	}
-	size_t m = 0;
 	while (m < n && s[m]) {
 		m++;
 	}
-	char *ret = malloc(m + 1);
-	if (ret) {
-		memcpy(ret, s, m);
-		ret[m] = '\0';
-	}
-#else
-	char *ret = strndup(s, n);
-#endif
-	if (!ret) {
-		fatal("x_strndup: Could not allocate %lu bytes", (unsigned long)n);
-	}
+	char *ret = x_malloc(m + 1);
+	memcpy(ret, s, m);
+	ret[m] = '\0';
 	return ret;
 }
 
@@ -1689,6 +1683,13 @@ subst_env_in_string(const char *str, char **errmsg)
 {
 	assert(errmsg);
 	*errmsg = NULL;
+
+	if (!strchr(str, '$')) {
+		// Fast path: no variables to expand. (This also sidesteps a
+		// vasprintf-related issue seen on AIX 5.1 where reassembling the
+		// string via reformat() lost the contents.)
+		return x_strdup(str);
+	}
 
 	char *result = x_strdup("");
 	const char *p = str; // Interval start.

@@ -18,6 +18,7 @@
 #include "confitems.h"
 #include "envtoconfitems.h"
 #include "ccache.h"
+#include "redis.h"
 
 enum handle_conf_result {
 	HANDLE_CONF_OK,
@@ -161,6 +162,8 @@ conf_create(void)
 	conf->read_only = false;
 	conf->read_only_direct = false;
 	conf->recache = false;
+	conf->remote_only = false;
+	conf->remote_storage = x_strdup("");
 	conf->run_second_cpp = true;
 	conf->sloppiness = 0;
 	conf->stats = true;
@@ -190,6 +193,7 @@ conf_free(struct conf *conf)
 	free(conf->path);
 	free(conf->prefix_command);
 	free(conf->prefix_command_cpp);
+	free(conf->remote_storage);
 	free(conf->temporary_dir);
 	free((void *)conf->item_origins); // Workaround for MSVC warning
 	free(conf);
@@ -383,6 +387,23 @@ conf_print_value(struct conf *conf, const char *key,
 	return true;
 }
 
+// Return a copy of a remote storage URL with any credentials (userinfo part)
+// removed so that it's safe to write to the log or show to the user. Uses the
+// same URL parsing as the Redis client to stay consistent with what is
+// actually treated as credentials. Unparsable URLs are replaced by a
+// placeholder (they may contain credentials that cannot be located).
+static char *
+redact_remote_storage_url(const char *url)
+{
+	struct redis_url parsed;
+	if (redis_parse_url(url, &parsed, NULL)) {
+		char *result = redis_url_for_logging(&parsed);
+		redis_free_url(&parsed);
+		return result;
+	}
+	return x_strdup("<invalid remote_storage URL>");
+}
+
 static bool
 print_item(struct conf *conf, const char *key,
            void (*printer)(const char *descr, const char *origin,
@@ -395,6 +416,11 @@ print_item(struct conf *conf, const char *key,
 	}
 	void *value = (char *)conf + item->offset;
 	char *str = item->formatter(value);
+	if (str && str_eq(key, "remote_storage") && !str_eq(str, "")) {
+		char *redacted = redact_remote_storage_url(str);
+		free(str);
+		str = redacted;
+	}
 	char *buf = x_strdup("");
 	reformat(&buf, "%s = %s", key, str);
 	printer(buf, conf->item_origins[item->number], context);
@@ -438,6 +464,8 @@ conf_print_items(struct conf *conf,
 	ok &= print_item(conf, "read_only", printer, context);
 	ok &= print_item(conf, "read_only_direct", printer, context);
 	ok &= print_item(conf, "recache", printer, context);
+	ok &= print_item(conf, "remote_only", printer, context);
+	ok &= print_item(conf, "remote_storage", printer, context);
 	ok &= print_item(conf, "run_second_cpp", printer, context);
 	ok &= print_item(conf, "sloppiness", printer, context);
 	ok &= print_item(conf, "stats", printer, context);

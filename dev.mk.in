@@ -52,6 +52,8 @@ headers = \
     src/mdfour.h \
     src/minitrace.h \
     src/murmurhashneutral2.h \
+    src/redis.h \
+    src/stdint.h \
     src/system.h \
     unittest/framework.h \
     unittest/util.h

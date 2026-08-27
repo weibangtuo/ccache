@@ -19,6 +19,15 @@
 
 #include <math.h>
 
+#ifndef HAVE_ROUND
+// Fallback for platforms without round() in libc/libm (e.g. AIX 5.1).
+double
+round(double x)
+{
+	return x >= 0.0 ? floor(x + 0.5) : ceil(x - 0.5);
+}
+#endif
+
 static struct files {
 	char *fname;
 	time_t mtime;

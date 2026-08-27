@@ -32,6 +32,8 @@ struct conf {
 	bool read_only;
 	bool read_only_direct;
 	bool recache;
+	bool remote_only;
+	char *remote_storage;
 	bool run_second_cpp;
 	unsigned sloppiness;
 	bool stats;

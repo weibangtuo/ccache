@@ -1,6 +1,26 @@
 ccache news
 ===========
 
+ccache 3.7.13 (unreleased)
+--------------------------
+
+New features
+~~~~~~~~~~~~
+
+- Added support for using a Redis server as remote (secondary) storage,
+  configured with the new *remote_storage* (*CCACHE_REMOTE_STORAGE*) option.
+  The configuration syntax and the behavior (local cache first, remote
+  write-back, graceful degradation when the remote storage is unreachable)
+  follow the Redis storage backend in ccache 4.x. Note that cache entries are
+  not interchangeable with ccache 4.x: both the hash algorithm and the entry
+  serialization format differ, so a 3.x client will never hit entries written
+  by a 4.x client and vice versa (they can, however, share the same Redis
+  database without interfering).
+
+- Added the *remote_only* (*CCACHE_REMOTE_ONLY*) option for only using remote
+  storage (the local cache directory is then used as a transient work area
+  only).
+
 ccache 3.7.12
 -------------
 

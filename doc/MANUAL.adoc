@@ -527,6 +527,63 @@ stats files.
     If true, ccache will not use any previously stored result. New results will
     still be cached, possibly overwriting any pre-existing results.
 
+*remote_only* (*CCACHE_REMOTE_ONLY* or *CCACHE_NOREMOTE_ONLY*, see <<_boolean_values,Boolean values>> above)::
+
+    If true, ccache will only use remote storage: cache
+    entries are retrieved from and stored in the remote storage only, and the
+    local cache directory is used as a transient work area (retrieved entries
+    are removed from the local cache after use, and newly compiled entries are
+    removed after having been stored in remote storage). Pre-existing local
+    cache entries are neither read nor removed, just like in ccache 4.x.
+    Statistics counters are still kept in the local cache directory. The
+    default is false. If *remote_storage* is not set, this option is silently
+    ignored and ccache behaves like in normal local caching mode. If the
+    remote storage is unreachable, cache misses cannot be avoided.
+
+*remote_storage* (*CCACHE_REMOTE_STORAGE*)::
+
+    This option specifies a Redis server to use as remote (secondary) storage.
+    The local cache in *cache_dir* is always checked first; on a
+    local cache miss the remote storage is queried and a hit is written back to
+    the local cache. A new compilation result is written to the local cache and
+    then to the remote storage. If the remote storage is unreachable, the
+    compilation is not affected. The default is empty (remote storage
+    disabled).
++
+URL format: `redis://[[USERNAME:]PASSWORD@]HOST[:PORT][/DBNUMBER]` or
+`redis+unix:SOCKET_PATH[?db=DBNUMBER]`. _PORT_ defaults to 6379 and _DBNUMBER_
+defaults to 0. _USERNAME_, _PASSWORD_ and _SOCKET_PATH_ are percent-encoded if
+they contain special characters.
++
+Examples:
++
+--------
+remote_storage = redis://localhost
+remote_storage = redis://p4ssw0rd@cache.example.com:6379/0
+remote_storage = redis+unix:/run/redis.sock
+--------
++
+NOTE: ccache will not perform any cleanup of the Redis storage, but you can
+https://redis.io/topics/lru-cache[configure LRU eviction] on the server.
+`ccache --clear` only clears the local cache, never the remote storage.
++
+NOTE: Cache entries are not interchangeable with ccache 4.x (different hash
+algorithms and entry formats), but both versions can share the same Redis
+database without interfering with each other.
++
+Additional notes:
++
+-- Values of this option support `$VARIABLE` expansion like other
+  environment-aware options.
+-- `ccache --get-config remote_storage` prints the URL verbatim, including any
+  password (it is intended for scripting); `--show-config` and the log file
+  show the URL with credentials redacted.
+-- The connect timeout (2 s) and operation timeout (10 s) are fixed and cannot
+  be configured (ccache 4.x supports per-URL timeout attributes).
+-- Host name resolution is blocking and only IPv4 is supported. Prefer an IP
+  literal or `redis+unix:` if name lookup is slow or unreliable on your
+  platform.
+
 *run_second_cpp* (*CCACHE_CPP2* or *CCACHE_NOCPP2*, see <<_boolean_values,Boolean values>> above)::
 
     If true, ccache will first run the preprocessor to preprocess the source
